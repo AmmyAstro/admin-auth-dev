@@ -41,17 +41,29 @@ console.log(
   corsOrigins
 );
 
+
 const corsOptions = {
   origin: corsOrigins,
   credentials: true,
-  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Authorization", "Content-Type"],
+  methods: [
+    "GET",
+    "HEAD",
+    "PUT",
+    "PATCH",
+    "POST",
+    "DELETE",
+    "OPTIONS",
+  ],
+  allowedHeaders: [
+    "Authorization",
+    "Content-Type",
+    "apollo-require-preflight",
+  ],
 };
 
 app.use(cors(corsOptions));
-
-// Handle preflight requests using the SAME CORS configuration
 app.options("*", cors(corsOptions));
+
   app.use(express.json());
   app.use(cookieParser());
   app.use(rateLimiter);

@@ -167,6 +167,32 @@ router.post(
   }
 );
 
+router.post(
+  "/puja-image",
+  upload.single("image"),
+  (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          error: "No file uploaded",
+        });
+      }
+
+      return res.json({
+        url: `/adminAuth/uploads/puja/${req.file.filename}`,
+      });
+    } catch (err) {
+
+      return res.status(500).json({
+        error: "Upload failed",
+      });
+    }
+  }
+);
+
+
+
+
 
 
 

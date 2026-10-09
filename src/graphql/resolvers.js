@@ -7,7 +7,7 @@ import {
 } from "../services/adminService.js";
 import { DateTimeResolver } from "graphql-scalars";
 import { connectMongo } from "../config/mongo.js";
-
+import { GraphQLError } from "graphql";
 import GraphQLUpload from "graphql-upload/GraphQLUpload.mjs";
 import GraphQLJSON from "graphql-type-json";
 import { generateSlug } from "../utils/slugify.js";
@@ -210,10 +210,128 @@ const generateCRUDPermissions = async (module, prismaInstance) => {
   }
 };
 
+const pujaInclude = {
+  mantraOptions: {
+    orderBy: { createdAt: "asc" },
+  },
+  faqs: {
+    orderBy: { createdAt: "asc" },
+  },
+  reviews: {
+    orderBy: { createdAt: "desc" },
+  },
+};
+
+const optionalText = (value) => (value === "" ? null : value);
+
+const cleanMantras = (items = []) =>
+  items.map((name) => name.trim()).filter(Boolean);
+
+const cleanFAQs = (items = []) =>
+  items
+    .filter((faq) => faq.question?.trim() && faq.answer?.trim())
+    .map((faq) => ({
+      question: faq.question.trim(),
+      answer: faq.answer.trim(),
+    }));
+
+function validatePrice(price, mrp, discount) {
+  if (!Number.isFinite(price) || price < 0) {
+    throw new GraphQLError("Price must be a valid non-negative number.");
+  }
+
+  if (mrp != null && (!Number.isFinite(mrp) || mrp < 0)) {
+    throw new GraphQLError("MRP must be a valid non-negative number.");
+  }
+
+  if (mrp != null && mrp < price) {
+    throw new GraphQLError("MRP cannot be less than the selling price.");
+  }
+
+  if (
+    discount != null &&
+    (!Number.isFinite(discount) || discount < 0 || discount > 100)
+  ) {
+    throw new GraphQLError("Discount must be between 0 and 100.");
+  }
+}
+
+async function recalculatePujaRating(prisma, pujaId) {
+  const result = await prisma.pujaReview.aggregate({
+    where: {
+      pujaId,
+      status: "APPROVED",
+    },
+    _avg: {
+      rating: true,
+    },
+  });
+
+  await prisma.pujaService.update({
+    where: { id: pujaId },
+    data: {
+      rating: result._avg.rating ?? 0,
+    },
+  });
+}
+
+function handlePrismaError(error) {
+  if (error?.code === "P2002") {
+    throw new GraphQLError("A Puja Service with this slug already exists.", {
+      extensions: { code: "BAD_USER_INPUT" },
+    });
+  }
+
+  if (error?.code === "P2025") {
+    throw new GraphQLError("The requested record was not found.", {
+      extensions: { code: "NOT_FOUND" },
+    });
+  }
+
+  throw error;
+}
+
 export const resolvers = {
   JSON: GraphQLJSON,
   Upload: GraphQLUpload,
   Query: {
+    pujaServices: async (_, __, context) => {
+      const prisma = context.prisma;
+
+      return prisma.pujaService.findMany({
+        include: pujaInclude,
+        orderBy: {
+          createdAt: "desc",
+        },
+      });
+    },
+
+    // Find by ID or slug
+    pujaService: async (_, { id, slug }, context) => {
+      const prisma = context.prisma;
+
+      if (!id && !slug) {
+        throw new GraphQLError("Provide either a Puja ID or slug.");
+      }
+
+      if (id && slug) {
+        throw new GraphQLError("Provide either ID or slug, not both.");
+      }
+
+      return prisma.pujaService.findUnique({
+        where: id ? { id } : { slug },
+        include: pujaInclude,
+      });
+    },
+
+    // Fetch reviews for a specific Puja
+    pujaReviews: async (_, { pujaId }, context) => {
+      return context.prisma.pujaReview.findMany({
+        where: { pujaId },
+        orderBy: { createdAt: "desc" },
+      });
+    },
+
     getAllWaitingQueues: async () => {
       try {
         const astrologers = await prisma.astrologer.findMany({
@@ -523,9 +641,7 @@ export const resolvers = {
           orderBy.createdAt = "desc";
         }
 
-       
-        const where = {        
-
+        const where = {
           ...(query
             ? {
                 OR: [
@@ -1262,250 +1378,246 @@ export const resolvers = {
 
     // -------------------- RESOLVER --------------------
 
-getUsersChatHistory: async (_, { searchInput }, { prisma }) => {
-  try {
-    const {
-      query,
-      sessionId,
-      astrologerName,
-      userId,
-      status,
-      filterType,
-      startDate,
-      endDate,
-      page = 1,
-      limit = 10,
-    } = searchInput;
+    getUsersChatHistory: async (_, { searchInput }, { prisma }) => {
+      try {
+        const {
+          query,
+          sessionId,
+          astrologerName,
+          userId,
+          status,
+          filterType,
+          startDate,
+          endDate,
+          page = 1,
+          limit = 10,
+        } = searchInput;
 
-    const safePage = Math.max(page, 1);
-    const safeLimit = Math.min(limit, 100);
+        const safePage = Math.max(page, 1);
+        const safeLimit = Math.min(limit, 100);
 
-    const skip = (safePage - 1) * safeLimit;
+        const skip = (safePage - 1) * safeLimit;
 
-    // ---------------- WHERE CONDITION ----------------
+        // ---------------- WHERE CONDITION ----------------
 
-    const where = {
-      type: "CHAT",
-    };
+        const where = {
+          type: "CHAT",
+        };
 
-    if (userId) {
-      where.userId = userId;
-    }
+        if (userId) {
+          where.userId = userId;
+        }
 
-    // ---------------- SEARCH FILTER ----------------
+        // ---------------- SEARCH FILTER ----------------
 
-    const searchFilters = [];
+        const searchFilters = [];
 
-    if (query) {
-      searchFilters.push(
-        {
-          id: {
-            contains: query,
-            mode: "insensitive",
-          },
-        },
-        {
-          user: {
+        if (query) {
+          searchFilters.push(
+            {
+              id: {
+                contains: query,
+                mode: "insensitive",
+              },
+            },
+            {
+              user: {
+                name: {
+                  contains: query,
+                  mode: "insensitive",
+                },
+              },
+            },
+          );
+        }
+
+        if (sessionId) {
+          where.id = sessionId;
+        }
+
+        if (searchFilters.length > 0) {
+          where.OR = searchFilters;
+        }
+
+        // ---------------- ASTROLOGER FILTER ----------------
+
+        if (astrologerName) {
+          where.astrologer = {
             name: {
-              contains: query,
+              contains: astrologerName,
               mode: "insensitive",
             },
-          },
+          };
         }
-      );
-    }
 
-    if (sessionId) {
-      where.id = sessionId;
-    }
+        // ---------------- STATUS FILTER ----------------
 
-    if (searchFilters.length > 0) {
-      where.OR = searchFilters;
-    }
+        if (status) {
+          where.status = status;
+        }
 
-    // ---------------- ASTROLOGER FILTER ----------------
+        // ---------------- DATE FILTER ----------------
 
-    if (astrologerName) {
-      where.astrologer = {
-        name: {
-          contains: astrologerName,
-          mode: "insensitive",
-        },
-      };
-    }
+        let start;
+        let end;
 
-    // ---------------- STATUS FILTER ----------------
+        if (filterType) {
+          switch (filterType) {
+            case "TODAY":
+              start = new Date();
+              start.setHours(0, 0, 0, 0);
 
-    if (status) {
-      where.status = status;
-    }
+              end = new Date();
+              break;
 
-    // ---------------- DATE FILTER ----------------
+            case "WEEK":
+              start = new Date();
+              start.setDate(start.getDate() - 7);
 
-    let start;
-    let end;
+              end = new Date();
+              break;
 
-    if (filterType) {
-      switch (filterType) {
-        case "TODAY":
-          start = new Date();
-          start.setHours(0, 0, 0, 0);
+            case "MONTH":
+              start = new Date();
+              start.setMonth(start.getMonth() - 1);
 
-          end = new Date();
-          break;
+              end = new Date();
+              break;
 
-        case "WEEK":
-          start = new Date();
-          start.setDate(start.getDate() - 7);
+            case "YEAR":
+              start = new Date();
+              start.setFullYear(start.getFullYear() - 1);
 
-          end = new Date();
-          break;
+              end = new Date();
+              break;
 
-        case "MONTH":
-          start = new Date();
-          start.setMonth(start.getMonth() - 1);
+            case "CUSTOM":
+              start = startDate
+                ? new Date(`${startDate}T00:00:00+05:30`)
+                : undefined;
 
-          end = new Date();
-          break;
+              end = endDate ? new Date(`${endDate}T00:00:00+05:30`) : undefined;
 
-        case "YEAR":
-          start = new Date();
-          start.setFullYear(start.getFullYear() - 1);
+              if (end) {
+                end.setDate(end.getDate() + 1);
+              }
 
-          end = new Date();
-          break;
+              break;
+          }
+        }
 
-        case "CUSTOM":
-          start = startDate
-            ? new Date(`${startDate}T00:00:00+05:30`)
-            : undefined;
+        if (start || end) {
+          where.createdAt = {};
 
-          end = endDate
-            ? new Date(`${endDate}T00:00:00+05:30`)
-            : undefined;
-
-          if (end) {
-            end.setDate(end.getDate() + 1);
+          if (start) {
+            where.createdAt.gte = start;
           }
 
-          break;
-      }
-    }
+          if (end) {
+            where.createdAt.lt = end;
+          }
+        }
 
-    if (start || end) {
-      where.createdAt = {};
+        // ---------------- FETCH DATA ----------------
 
-      if (start) {
-        where.createdAt.gte = start;
-      }
+        const [sessions, totalCount, aggregate] = await Promise.all([
+          prisma.session.findMany({
+            where,
 
-      if (end) {
-        where.createdAt.lt = end;
-      }
-    }
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  mobile: true,
+                  countryCode: true,
+                },
+              },
 
-    // ---------------- FETCH DATA ----------------
+              astrologer: {
+                select: {
+                  id: true,
+                  name: true,
+                  displayName: true,
+                },
+              },
 
-    const [sessions, totalCount, aggregate] = await Promise.all([
-      prisma.session.findMany({
-        where,
-
-        include: {
-          user: {
-            select: {
-              id: true,
-              name: true,
-              mobile: true,
-              countryCode: true,
+              remedies: {
+                select: {
+                  id: true,
+                },
+                take: 1,
+              },
             },
-          },
 
-          astrologer: {
-            select: {
-              id: true,
-              name: true,
-              displayName: true,
+            orderBy: {
+              createdAt: "desc",
             },
-          },
 
-          remedies: {
-            select: {
-              id: true,
+            skip,
+            take: safeLimit,
+          }),
+
+          prisma.session.count({
+            where,
+          }),
+
+          prisma.session.aggregate({
+            where,
+
+            _sum: {
+              coinsDeducted: true,
+              coinsEarned: true,
+              commission: true,
             },
-            take: 1,
-          },
-        },
+          }),
+        ]);
 
-        orderBy: {
-          createdAt: "desc",
-        },
+        // ---------------- FORMAT RESPONSE ----------------
 
-        skip,
-        take: safeLimit,
-      }),
+        const formattedData = sessions.map((session) => ({
+          sessionId: session.id,
+          userId: session.userId,
+          source: session.source,
+          userName: session.user?.name || "",
+          mobile: session.user?.mobile || "",
+          by: session.by,
 
-      prisma.session.count({
-        where,
-      }),
+          astrologerId: session.astrologer?.id || null,
+          astrologerName:
+            session.astrologer?.displayName || session.astrologer?.name || "",
 
-      prisma.session.aggregate({
-        where,
+          type: session.type,
+          status: session.status,
 
-        _sum: {
-          coinsDeducted: true,
-          coinsEarned: true,
-          commission: true,
-        },
-      }),
-    ]);
+          ratePerMin: session.ratePerMin || 0,
+          durationSec: session.durationSec || 0,
 
-    // ---------------- FORMAT RESPONSE ----------------
+          coinsDeducted: session.coinsDeducted || 0,
+          coinsEarned: session.coinsEarned || 0,
+          commission: session.commission || 0,
 
-    const formattedData = sessions.map((session) => ({
-      sessionId: session.id,
-      userId: session.userId,
-      source: session.source,
-      userName: session.user?.name || "",
-      mobile: session.user?.mobile || "",
-      by: session.by,
+          startedAt: session.startedAt,
+          endedAt: session.endedAt,
 
-      astrologerId: session.astrologer?.id || null,
-      astrologerName:
-        session.astrologer?.displayName ||
-        session.astrologer?.name ||
-        "",
+          hasRemedy: session.remedies.length > 0,
+          createdAt: session.createdAt,
+        }));
 
-      type: session.type,
-      status: session.status,
+        return {
+          data: formattedData,
+          totalCount,
+          currentPage: safePage,
+          totalPages: Math.ceil(totalCount / safeLimit),
 
-      ratePerMin: session.ratePerMin || 0,
-      durationSec: session.durationSec || 0,
-
-      coinsDeducted: session.coinsDeducted || 0,
-      coinsEarned: session.coinsEarned || 0,
-      commission: session.commission || 0,
-
-      startedAt: session.startedAt,
-      endedAt: session.endedAt,
-
-      hasRemedy: session.remedies.length > 0,
-      createdAt: session.createdAt,
-    }));
-
-    return {
-      data: formattedData,
-      totalCount,
-      currentPage: safePage,
-      totalPages: Math.ceil(totalCount / safeLimit),
-
-      totalCoinsDeducted: aggregate?._sum?.coinsDeducted || 0,
-      totalCoinsEarned: aggregate?._sum?.coinsEarned || 0,
-      totalCommission: aggregate?._sum?.commission || 0,
-    };
-  } catch (error) {
-    throw new Error("Failed to fetch users chat history");
-  }
-},
+          totalCoinsDeducted: aggregate?._sum?.coinsDeducted || 0,
+          totalCoinsEarned: aggregate?._sum?.coinsEarned || 0,
+          totalCommission: aggregate?._sum?.commission || 0,
+        };
+      } catch (error) {
+        throw new Error("Failed to fetch users chat history");
+      }
+    },
     getCallRecording: async (_, { sessionId }, { prisma }) => {
       return prisma.callRecording.findFirst({
         where: {
@@ -5319,60 +5431,361 @@ getUsersChatHistory: async (_, { searchInput }, { prisma }) => {
         throw new Error(error.message || "Failed to fetch refund requests");
       }
     },
+
+    getAdminServiceBookingReport: async (
+      _,
+      { page = 1, limit = 20, bookingStatus },
+      context,
+    ) => {
+      try {
+        // ==========================================
+        // SUPER_ADMIN ONLY
+        // ==========================================
+        if (!context.user || context.user.role.name !== "SUPER_ADMIN") {
+          throw new Error("Only SUPER_ADMIN can view service booking reports");
+        }
+
+        // ==========================================
+        // PAGINATION
+        // ==========================================
+        const currentPage = Math.max(1, Number(page) || 1);
+
+        const take = Math.min(Math.max(1, Number(limit) || 20), 100);
+
+        const skip = (currentPage - 1) * take;
+
+        // ==========================================
+        // FILTER
+        // ==========================================
+        const where = {};
+
+        if (
+          bookingStatus !== null &&
+          bookingStatus !== undefined &&
+          bookingStatus !== ""
+        ) {
+          where.bookingStatus = bookingStatus;
+        }
+
+        // ==========================================
+        // FETCH BOOKINGS + TOTAL
+        // ==========================================
+        const [bookings, total] = await Promise.all([
+          prisma.serviceBooking.findMany({
+            where,
+
+            skip,
+            take,
+
+            orderBy: {
+              createdAt: "desc",
+            },
+
+            select: {
+              id: true,
+
+              bookingStatus: true,
+
+              createdAt: true,
+
+              // ==========================================
+              // ORIGINAL SERVICE AMOUNT
+              // ==========================================
+              amount: true,
+
+              // ==========================================
+              // USER
+              // ==========================================
+              user: {
+                select: {
+                  name: true,
+                  mobile: true,
+                },
+              },
+
+              // ==========================================
+              // SERVICE
+              // ==========================================
+              service: {
+                select: {
+                  name: true,
+                },
+              },
+
+              // ==========================================
+              // ASTROLOGER
+              // ==========================================
+              astrologer: {
+                select: {
+                  name: true,
+                },
+              },
+
+              // ==========================================
+              // PAYMENT ORDERS
+              // ==========================================
+              paymentOrders: {
+                select: {
+                  id: true,
+
+                  // Total original service/order amount
+                  totalAmount: true,
+
+                  // Amount paid using wallet
+                  walletAmount: true,
+
+                  // Actual payable amount
+                  payableAmount: true,
+
+                  // Cashback amount
+                  cashback: true,
+
+                  // Coupon ID
+                  couponId: true,
+
+                  // Payment status
+                  status: true,
+
+                  createdAt: true,
+
+                  // ==========================================
+                  // COUPON
+                  // ==========================================
+                  coupon: {
+                    select: {
+                      code: true,
+                      type: true,
+                    },
+                  },
+
+                  // ==========================================
+                  // COUPON REDEMPTION
+                  // ==========================================
+                  couponRedemption: {
+                    select: {
+                      discount: true,
+                    },
+                  },
+                },
+
+                orderBy: {
+                  createdAt: "desc",
+                },
+
+                take: 1,
+              },
+            },
+          }),
+
+          prisma.serviceBooking.count({
+            where,
+          }),
+        ]);
+
+        // ==========================================
+        // FORMAT RESPONSE
+        // ==========================================
+        const data = bookings.map((booking) => {
+          // paymentOrders is an array
+          const paymentOrder = booking.paymentOrders?.[0] || null;
+
+          // ==========================================
+          // ORIGINAL AMOUNT
+          //
+          // Prefer ServicePaymentOrder.totalAmount.
+          // Fallback to ServiceBooking.amount.
+          // ==========================================
+          const originalAmount = Number(
+            paymentOrder?.totalAmount ?? booking.amount ?? 0,
+          );
+
+          // ==========================================
+          // COUPON TYPE
+          // ==========================================
+          const couponType = paymentOrder?.coupon?.type || null;
+
+          // ==========================================
+          // COUPON NAME
+          // ==========================================
+          const couponName = paymentOrder?.coupon?.code || null;
+
+          // ==========================================
+          // COUPON DISCOUNT
+          //
+          // Discount is stored in CouponRedemption.
+          // ==========================================
+          const couponDiscount = Number(
+            paymentOrder?.couponRedemption?.discount ?? 0,
+          );
+
+          // ==========================================
+          // DISCOUNT AMOUNT
+          //
+          // Only DISCOUNT coupon is counted here.
+          // ==========================================
+          const discountAmount = couponType === "DISCOUNT" ? couponDiscount : 0;
+
+          // ==========================================
+          // CASHBACK AMOUNT
+          //
+          // Cashback is stored directly on
+          // ServicePaymentOrder.cashback.
+          // ==========================================
+          const cashbackAmount =
+            couponType === "CASHBACK" ? Number(paymentOrder?.cashback ?? 0) : 0;
+
+          // ==========================================
+          // FINAL PAID AMOUNT
+          //
+          // payableAmount represents the actual
+          // amount payable after discount.
+          //
+          // For DISCOUNT:
+          // payableAmount = original - discount
+          //
+          // For CASHBACK:
+          // user pays the normal amount and
+          // cashback is credited separately.
+          // ==========================================
+          let finalPaidAmount;
+
+          if (paymentOrder) {
+            if (couponType === "DISCOUNT") {
+              finalPaidAmount = Number(
+                paymentOrder.payableAmount ??
+                  Math.max(0, originalAmount - discountAmount),
+              );
+            } else if (couponType === "CASHBACK") {
+              finalPaidAmount = Number(paymentOrder.payableAmount);
+              console.log("CASHBACK", finalPaidAmount);
+            } else {
+              finalPaidAmount = Number(paymentOrder.payableAmount);
+            }
+          } else {
+            console.log(
+              "----------else originalAmount--------",
+              originalAmount,
+            );
+            finalPaidAmount = originalAmount;
+          }
+
+          // ==========================================
+          // RETURN
+          // ==========================================
+          return {
+            id: booking.id,
+
+            // Original service/order amount
+            amount: originalAmount,
+
+            // Coupon information
+            couponName,
+
+            couponType,
+
+            // Discount
+            discountAmount,
+
+            // Cashback
+            cashbackAmount,
+
+            // Actual amount paid by user
+            finalPaidAmount,
+
+            // User
+            userName: booking.user?.name || null,
+
+            userMobile: booking.user?.mobile || null,
+
+            // Service
+            serviceName: booking.service?.name || null,
+
+            // Booking
+            bookingStatus: booking.bookingStatus,
+
+            bookingDate: booking.createdAt
+              ? booking.createdAt.toISOString()
+              : null,
+
+            // Astrologer
+            assignedTo: booking.astrologer?.name || null,
+          };
+        });
+
+        // ==========================================
+        // RETURN
+        // ==========================================
+        return {
+          success: true,
+
+          total,
+
+          currentPage,
+
+          totalPages: Math.ceil(total / take),
+
+          limit: take,
+
+          data,
+        };
+      } catch (error) {
+        console.error("getAdminServiceBookingReport error:", error);
+
+        throw new Error(
+          error.message || "Failed to fetch service booking report",
+        );
+      }
+    },
   },
 
   // **********************************************START MUTATION**********************************
 
   Mutation: {
+    restoreAstrologer: async (_, { astrologerId }, context) => {
+      const { prisma } = context;
 
-restoreAstrologer: async (_, { astrologerId }, context) => {
-  const { prisma } = context;
+      await checkPermission(context, "astrologer-list.update");
 
-  await checkPermission(context, "astrologer-list.update");
+      try {
+        const existing = await prisma.astrologer.findUnique({
+          where: {
+            id: astrologerId,
+          },
+        });
 
-  try {
-    const existing = await prisma.astrologer.findUnique({
-      where: {
-        id: astrologerId,
-      },
-    });
+        if (!existing) {
+          throw new Error("Astrologer not found");
+        }
 
-    if (!existing) {
-      throw new Error("Astrologer not found");
-    }
+        if (!existing.isDeleted) {
+          throw new Error("Astrologer is already active");
+        }
 
-    if (!existing.isDeleted) {
-      throw new Error("Astrologer is already active");
-    }
+        await prisma.astrologer.update({
+          where: {
+            id: astrologerId,
+          },
+          data: {
+            // Restore astrologer
+            isDeleted: false,
+            status: true,
 
-    await prisma.astrologer.update({
-      where: {
-        id: astrologerId,
-      },
-      data: {
-        // Restore astrologer
-        isDeleted: false,
-        status: true,
+            // Make sure all activity states are reset correctly
+            isOnline: false,
+            isBusy: false,
+            isChatActive: false,
+            isCallActive: false,
+            isLiveActive: false,
+          },
+        });
 
-        // Make sure all activity states are reset correctly
-        isOnline: false,
-        isBusy: false,
-        isChatActive: false,
-        isCallActive: false,
-        isLiveActive: false,
-      },
-    });
+        return true;
+      } catch (error) {
+        console.error("restoreAstrologer error:", error);
 
-    return true;
-  } catch (error) {
-    console.error("restoreAstrologer error:", error);
-
-    throw new Error(
-      error.message || "Failed to restore astrologer"
-    );
-  }
-},
-
+        throw new Error(error.message || "Failed to restore astrologer");
+      }
+    },
 
     createRefundRequest: async (_, { input }, context) => {
       try {
@@ -6794,28 +7207,28 @@ restoreAstrologer: async (_, { astrologerId }, context) => {
 
     // ================= ADD ASTROLOGER =================
     addAstrologer: async (_, { data }, context) => {
-  const { prisma } = context;
+      const { prisma } = context;
 
-let application = null;
+      let application = null;
 
-if (data.applicationId) {
-  application = await prisma.astrologerApplication.findUnique({
-    where: {
-      id: data.applicationId,
-    },
-    include: {
-      kycDetail: true,
-    },
-  });
+      if (data.applicationId) {
+        application = await prisma.astrologerApplication.findUnique({
+          where: {
+            id: data.applicationId,
+          },
+          include: {
+            kycDetail: true,
+          },
+        });
 
-  if (!application) {
-    throw new Error("Astrologer application not found");
-  }
+        if (!application) {
+          throw new Error("Astrologer application not found");
+        }
 
-  if (application.astrologerId) {
-    throw new Error("Astrologer already created for this application");
-  }
-}
+        if (application.astrologerId) {
+          throw new Error("Astrologer already created for this application");
+        }
+      }
 
       try {
         await checkPermission(context, "add-astrologer.create");
@@ -7258,75 +7671,63 @@ if (data.applicationId) {
     },
 
     // ================= DELETE ASTROLOGER =================
-   
 
+    deleteAstrologer: async (_, { astrologerId, deleteRemark }, context) => {
+      try {
+        if (
+          !context.user ||
+          !["SUPER_ADMIN", "MANAGER"].includes(context.user.role?.name)
+        ) {
+          throw new Error("Not authorized");
+        }
 
+        console.log("DELETE ASTRO INPUT:", {
+          userId: context.user.id,
+          userName: context.user.name,
+          deleteRemark,
+          astrologerId,
+        });
 
-deleteAstrologer: async (_, { astrologerId, deleteRemark }, context) => {
-  try {
-    if (
-      !context.user ||
-      !["SUPER_ADMIN", "MANAGER"].includes(context.user.role?.name)
-    ) {
-      throw new Error("Not authorized");
-    }
+        const existing = await prisma.astrologer.findUnique({
+          where: {
+            id: astrologerId,
+          },
+        });
 
-    console.log("DELETE ASTRO INPUT:", {
-      userId: context.user.id,
-      userName: context.user.name,
-      deleteRemark,
-      astrologerId,
-    });
+        if (!existing) {
+          throw new Error("Astrologer not found");
+        }
 
-    const existing = await prisma.astrologer.findUnique({
-      where: {
-        id: astrologerId,
-      },
-    });
+        await prisma.astrologer.update({
+          where: {
+            id: astrologerId,
+          },
 
-    if (!existing) {
-      throw new Error("Astrologer not found");
-    }
+          data: {
+            // Existing delete logic
+            isDeleted: true,
+            status: false,
+            isOnline: false,
+            isBusy: false,
+            isChatActive: false,
+            isCallActive: false,
+            isLiveActive: false,
 
-    await prisma.astrologer.update({
-      where: {
-        id: astrologerId,
-      },
+            // Delete metadata
+            deletedAt: new Date(),
+            deletedById: context.user.id,
+            deletedByName: context.user.name,
+            deleteRemark: deleteRemark || null,
+          },
+        });
 
-      data: {
-        // Existing delete logic
-        isDeleted: true,
-        status: false,
-        isOnline: false,
-        isBusy: false,
-        isChatActive: false,
-        isCallActive: false,
-        isLiveActive: false,
+        return true;
+      } catch (error) {
+        console.error("deleteAstrologer error:", error);
 
-        // Delete metadata
-        deletedAt: new Date(),
-        deletedById: context.user.id,
-        deletedByName: context.user.name,
-        deleteRemark: deleteRemark || null,
-      },
-    });
-
-    return true;
-  } catch (error) {
-    console.error("deleteAstrologer error:", error);
-
-    throw new Error(
-      error.message || "Failed to delete astrologer"
-    );
-  }
-},
-
-
-
-
-
-
-
+        throw new Error(error.message || "Failed to delete astrologer");
+      }
+    },
 
     // ================= UPDATE USER =================
     updateUser: async (_, { userId, data }, context) => {
@@ -7551,7 +7952,7 @@ deleteAstrologer: async (_, { astrologerId, deleteRemark }, context) => {
 
       return prisma.coupon.create({
         data: {
-          code: input.code,
+          code: input.code?.toUpperCase(),
           description: input.description,
 
           applicable: input.applicable,
@@ -9658,6 +10059,245 @@ deleteAstrologer: async (_, { astrologerId, deleteRemark }, context) => {
           isActive: status,
         },
       });
+    },
+
+     createPujaService: async (_, args, context) => {
+      const prisma = context.prisma;
+
+      validatePrice(args.price, args.mrp, args.discount);
+
+      const mantraOptions = cleanMantras(args.mantraOptions);
+      const faqs = cleanFAQs(args.faqs);
+
+      try {
+        return await prisma.pujaService.create({
+          data: {
+            title: args.title.trim(),
+            slug: args.slug.trim(),
+            image: args.image.trim(),
+            category: optionalText(args.category),
+
+            shortDescription: optionalText(args.shortDescription),
+            description: optionalText(args.description),
+            benefits: optionalText(args.benefits),
+            howToPerform: optionalText(args.howToPerform),
+            packaging: optionalText(args.packaging),
+
+            price: args.price,
+            mrp: args.mrp ?? null,
+            discount: args.discount ?? null,
+
+            // These are admin-managed display fields.
+            customersCount: args.customersCount ?? 0,
+            rating: 0,
+
+            mantraOptions: {
+              create: mantraOptions.map((name) => ({ name })),
+            },
+
+            faqs: {
+              create: faqs,
+            },
+          },
+          include: pujaInclude,
+        });
+      } catch (error) {
+        handlePrismaError(error);
+      }
+    },
+
+    // ==========================================
+    // UPDATE PUJA
+    // ==========================================
+    updatePujaService: async (_, { id, ...args }, context) => {
+      const prisma = context.prisma;
+
+      validatePrice(args.price, args.mrp, args.discount);
+
+      const mantraOptions = cleanMantras(args.mantraOptions);
+      const faqs = cleanFAQs(args.faqs);
+
+      try {
+        // Replace editable mantra options and FAQs atomically.
+        // Reviews are intentionally NOT deleted during an update.
+        return await prisma.$transaction(async (tx) => {
+          const existing = await tx.pujaService.findUnique({
+            where: { id },
+            select: { id: true },
+          });
+
+          if (!existing) {
+            throw new GraphQLError("Puja Service not found.", {
+              extensions: { code: "NOT_FOUND" },
+            });
+          }
+
+          return tx.pujaService.update({
+            where: { id },
+            data: {
+              title: args.title.trim(),
+              slug: args.slug.trim(),
+              image: args.image.trim(),
+              category: optionalText(args.category),
+
+              shortDescription: optionalText(args.shortDescription),
+              description: optionalText(args.description),
+              benefits: optionalText(args.benefits),
+              howToPerform: optionalText(args.howToPerform),
+              packaging: optionalText(args.packaging),
+
+              price: args.price,
+              mrp: args.mrp ?? null,
+              discount: args.discount ?? null,
+
+              customersCount: args.customersCount ?? 0,
+
+              mantraOptions: {
+                deleteMany: {},
+                create: mantraOptions.map((name) => ({ name })),
+              },
+
+              faqs: {
+                deleteMany: {},
+                create: faqs,
+              },
+            },
+            include: pujaInclude,
+          });
+        });
+      } catch (error) {
+        handlePrismaError(error);
+      }
+    },
+
+    // ==========================================
+    // DELETE PUJA
+    // ==========================================
+    deletePujaService: async (_, { id }, context) => {
+      try {
+        await context.prisma.pujaService.delete({
+          where: { id },
+        });
+
+        return true;
+      } catch (error) {
+        handlePrismaError(error);
+      }
+    },
+
+    // ==========================================
+    // CREATE REVIEW
+    // ==========================================
+    createPujaReview: async (
+      _,
+      { pujaId, rating, comment },
+      context
+    ) => {
+      const prisma = context.prisma;
+
+      if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+        throw new GraphQLError(
+          "Rating must be an integer between 1 and 5."
+        );
+      }
+
+      if (!comment?.trim()) {
+        throw new GraphQLError("Review comment is required.");
+      }
+
+      const user = context.user;
+
+      // Adapt these fields to your existing auth context.
+      const userId = user?.id ?? null;
+      const userName =
+        user?.name ||
+        user?.fullName ||
+        user?.username ||
+        "Guest";
+
+      const puja = await prisma.pujaService.findUnique({
+        where: { id: pujaId },
+        select: { id: true },
+      });
+
+      if (!puja) {
+        throw new GraphQLError("Puja Service not found.", {
+          extensions: { code: "NOT_FOUND" },
+        });
+      }
+
+      // New reviews are pending until approved by an admin.
+      return prisma.pujaReview.create({
+        data: {
+          pujaId,
+          userId,
+          userName,
+          rating,
+          comment: comment.trim(),
+          status: "PENDING",
+        },
+      });
+    },
+
+    // ==========================================
+    // APPROVE / REJECT REVIEW
+    // ==========================================
+    updatePujaReviewStatus: async (
+      _,
+      { id, status },
+      context
+    ) => {
+      const prisma = context.prisma;
+
+      try {
+        return await prisma.$transaction(async (tx) => {
+          const review = await tx.pujaReview.update({
+            where: { id },
+            data: { status },
+          });
+
+          await recalculatePujaRating(tx, review.pujaId);
+
+          return review;
+        });
+      } catch (error) {
+        handlePrismaError(error);
+      }
+    },
+
+    // ==========================================
+    // DELETE REVIEW
+    // ==========================================
+    deletePujaReview: async (_, { id }, context) => {
+      const prisma = context.prisma;
+
+      try {
+        await prisma.$transaction(async (tx) => {
+          const review = await tx.pujaReview.findUnique({
+            where: { id },
+            select: {
+              id: true,
+              pujaId: true,
+            },
+          });
+
+          if (!review) {
+            throw new GraphQLError("Review not found.", {
+              extensions: { code: "NOT_FOUND" },
+            });
+          }
+
+          await tx.pujaReview.delete({
+            where: { id },
+          });
+
+          await recalculatePujaRating(tx, review.pujaId);
+        });
+
+        return true;
+      } catch (error) {
+        handlePrismaError(error);
+      }
     },
   },
 
