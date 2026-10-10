@@ -4,25 +4,22 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
-    "test": "jest --runInBand",
+    "start": "node --import ./instrument.js src/server.js",
+  "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --runInBand",
     "seed": "node prisma/seedAdmin.js"
   },
   "prisma": {
     "seed": "node prisma/seedAdmin.js"
   },
-  "jest": {
-    "testEnvironment": "node",
-    "transform": {
-      "^.+\\.js$": "babel-jest"
-    }
-  },
+ 
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "@apollo/server": "^4.13.0",
     "@prisma/client": "^5.22.0",
+    "@sentry/node": "^11.6.0",
+    "@sentry/profiling-node": "^11.6.0",
     "bcryptjs": "^3.0.3",
     "cookie": "^1.1.1",
     "cors": "^2.8.6",

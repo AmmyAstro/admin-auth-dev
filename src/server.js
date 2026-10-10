@@ -1,14 +1,16 @@
+import * as Sentry from "@sentry/node";
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import { performance } from "node:perf_hooks";
 
 import { ApolloServer } from "@apollo/server";
 import { expressMiddleware } from "@apollo/server/express4";
 import { ApolloServerPluginLandingPageLocalDefault } from "@apollo/server/plugin/landingPage/default";
 import path from "path";
 
-import { PrismaClient } from "@prisma/client";
+import prisma from "./config/prisma.js";
 import typeDefs from "./graphql/typeDefs.js";
 import { resolvers } from "./graphql/resolvers.js";
 import rateLimiter from "./middleware/rateLimiter.js";
@@ -18,7 +20,7 @@ import graphqlUploadExpress from "graphql-upload/graphqlUploadExpress.mjs";
 import GraphQLUpload from "graphql-upload/GraphQLUpload.mjs";
 import { fileURLToPath } from "url";
 
-const prisma = new PrismaClient();
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -99,10 +101,13 @@ app.use(graphqlUploadExpress({ maxFileSize: 10000000, maxFiles: 5 }));
 
         if (authHeader?.startsWith("Bearer ")) {
           const token = authHeader.replace("Bearer ", "");
-
+const jwtStart = performance.now();
           try {
             const decoded = verifyAccessToken(token);
-
+console.log(
+  "[JWT] verifyAccessToken:",
+  `${(performance.now() - jwtStart).toFixed(2)} ms`
+);
             if (decoded?.type === "staff") {
               user = await prisma.staff.findUnique({
                 where: { id: decoded.id },
@@ -118,8 +123,17 @@ app.use(graphqlUploadExpress({ maxFileSize: 10000000, maxFiles: 5 }));
       },
     })
   );
-
+Sentry.setupExpressErrorHandler(app);
   const PORT = process.env.PORT ||8005;
+app.get("/debug-sentry", function mainHandler(req, res) {
+  // Send a log before throwing the error
+  Sentry.logger.info('User triggered test error', {
+    action: 'test_error_endpoint',
+  });
+  // Send a test metric before throwing the error
+  Sentry.metrics.count('test_counter', 1);
+  throw new Error("My first Sentry error!");
+});
   app.listen(PORT, () => {
   });
 }

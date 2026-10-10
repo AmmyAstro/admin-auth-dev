@@ -1,4 +1,4 @@
-import { PrismaClient } from "@prisma/client";
+import prisma from "../config/prisma.js";
 import bcrypt from "bcryptjs";
 import {
   createAdminService,
@@ -13,7 +13,6 @@ import GraphQLJSON from "graphql-type-json";
 import { generateSlug } from "../utils/slugify.js";
 import { generateAccessToken, generateRefreshToken } from "../config/jwt.js";
 
-const prisma = new PrismaClient();
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";

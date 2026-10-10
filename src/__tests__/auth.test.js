@@ -6,11 +6,15 @@ import { ApolloServer } from "@apollo/server";
 import { expressMiddleware } from "@apollo/server/express4";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
-import { PrismaClient } from "@prisma/client";
+
 
 import typeDefs from "../graphql/typeDefs.js";
 import { resolvers } from "../graphql/resolvers.js";
-const { DocumentType, DocumentStatus } = require("@prisma/client"); 
+import {
+  PrismaClient,
+  DocumentType,
+  DocumentStatus,
+} from "@prisma/client";
 
 const prisma = new PrismaClient();
 let app;
@@ -68,8 +72,21 @@ beforeAll(async () => {
   );
 
   // Roles
-  const superRole = await prisma.role.create({ data: { name: "SUPER_ADMIN" } });
-  const adminRole = await prisma.role.create({ data: { name: "ADMIN" } });
+
+const superRole = await prisma.role.create({
+  data: {
+    name: "SUPER_ADMIN",
+    slug: "super-admin",
+  },
+});
+
+const adminRole = await prisma.role.create({
+  data: {
+    name: "ADMIN",
+    slug: "admin",
+  },
+});
+
   superRoleId = superRole.id;
   adminRoleId = adminRole.id;
 
